@@ -1,0 +1,21 @@
+
+services:
+  db:
+    image: postgres:16
+    container_name: scm-postgres
+    environment:
+      POSTGRES_DB: scm
+      POSTGRES_USER: scm_user
+      POSTGRES_PASSWORD: local_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scm_user -d scm"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:

@@ -12,6 +12,7 @@ from app.demand_analytics import router as demand_router
 from app.demand_ingestion import router as demand_ingestion_router
 from app.stock_cover import router as stock_cover_router
 from app.supplier_products import router as supplier_products_router
+from app.replenishment import router as replenishment_router
 
 app = FastAPI(
     title="SCM Decision Engine",
@@ -25,6 +26,7 @@ app.include_router(demand_router)
 app.include_router(demand_ingestion_router)
 app.include_router(stock_cover_router)
 app.include_router(supplier_products_router)
+app.include_router(replenishment_router)
 
 
 def get_db():

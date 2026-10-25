@@ -10,6 +10,15 @@ DATABASE_URL = os.getenv(
     "postgresql+psycopg://scm_user:local_dev_password@localhost:5432/scm",
 )
 
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,

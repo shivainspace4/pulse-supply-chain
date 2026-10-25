@@ -1,5 +1,5 @@
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -29,8 +29,13 @@ import {
   getProducts,
   getInventory,
   getExpiringInventory,
+  getReplenishmentRecommendations,
+  createProductionPlan,
   type Product,
   type InventoryLot,
+  type ReplenishmentRecommendation,
+  type ProductionRequest,
+  type ProductionPlan,
 } from "./api";
 
 type LoadStatus = "loading" | "connected" | "error";
@@ -417,6 +422,372 @@ function LiveInventory({
   );
 }
 
+function ReplenishmentPanel({
+  recommendations,
+  status,
+  onRefresh,
+}: {
+  recommendations: ReplenishmentRecommendation[];
+  status: LoadStatus;
+  onRefresh: () => void;
+}) {
+  const reorderCount = recommendations.filter(
+    (item) => item.action === "REORDER_RECOMMENDED",
+  ).length;
+  const lowConfidenceCount = recommendations.filter(
+    (item) => item.confidence === "LOW",
+  ).length;
+
+  return (
+    <section className="panel replenishment-panel" id="replenishment">
+      <PanelHeader
+        eyebrow="SUPPLY INTELLIGENCE · LIVE API"
+        title="Replenishment recommendations"
+        action={
+          <button className="subtle-button" onClick={onRefresh}>
+            <RefreshCw size={14} /> Refresh
+          </button>
+        }
+      />
+
+      <div className="panel-meta replenishment-meta">
+        <span>Demand-led reorder suggestions using supplier lead times and safety stock</span>
+        {status === "connected" ? (
+          <StatusPill status="success">
+            <CheckCircle2 size={12} /> API connected
+          </StatusPill>
+        ) : status === "loading" ? (
+          <StatusPill status="neutral">Loading</StatusPill>
+        ) : (
+          <StatusPill status="danger">API unavailable</StatusPill>
+        )}
+      </div>
+
+      {status === "error" ? (
+        <div className="empty-state">
+          <AlertTriangle size={22} />
+          <strong>Could not load replenishment recommendations</strong>
+          <span>Check that FastAPI is running and GET /replenishment/ is registered.</span>
+        </div>
+      ) : status === "loading" ? (
+        <div className="empty-state">
+          <RefreshCw size={20} />
+          <strong>Loading recommendations</strong>
+          <span>PULSE is checking stock cover, demand and supplier lead times.</span>
+        </div>
+      ) : recommendations.length === 0 ? (
+        <div className="empty-state">
+          <Package size={22} />
+          <strong>No recommendations returned</strong>
+          <span>Check that products have inventory, demand data and supplier mappings.</span>
+        </div>
+      ) : (
+        <>
+          <div className="inventory-summary replenishment-summary">
+            <div className="inventory-stat">
+              <span>Recommendations</span>
+              <strong>{recommendations.length}</strong>
+              <small>Supplier scenarios returned</small>
+            </div>
+            <div className="inventory-stat replenishment-positive-stat">
+              <span>Reorder signals</span>
+              <strong>{reorderCount}</strong>
+              <small>Require review</small>
+            </div>
+            <div className="inventory-stat warning-stat">
+              <span>Low-confidence results</span>
+              <strong>{lowConfidenceCount}</strong>
+              <small>Validate demand history</small>
+            </div>
+          </div>
+
+          <div className="inventory-table-heading">
+            <div>
+              <h3>Suggested actions</h3>
+              <p>Review quantities and confidence before placing any order.</p>
+            </div>
+            <span className="record-count">{recommendations.length} results</span>
+          </div>
+
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Product / depot</th>
+                  <th>Supplier</th>
+                  <th>Usable stock</th>
+                  <th>Cover</th>
+                  <th>Lead time</th>
+                  <th>Target stock</th>
+                  <th>Suggested order</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recommendations.map((item, index) => {
+                  const isReorder = item.action === "REORDER_RECOMMENDED";
+                  const isLowConfidence = item.confidence === "LOW";
+                  const actionStatus = isReorder
+                    ? "danger"
+                    : item.action === "NO_REORDER_NEEDED"
+                      ? "success"
+                      : "warning";
+
+                  return (
+                    <tr key={`${item.sku}-${item.depot_id}-${item.supplier_id ?? "unmapped"}-${index}`}>
+                      <td>
+                        <span className="sku-code">{item.sku}</span>
+                        <div className="muted-note">{item.depot_id}</div>
+                      </td>
+                      <td>
+                        <div className="product-name">{item.supplier_name ?? "Mapping required"}</div>
+                        <div className="muted-note">{item.supplier_id ?? "No supplier mapping"}</div>
+                      </td>
+                      <td>{formatNumber(item.usable_units)}</td>
+                      <td>{item.days_of_cover == null ? "Unknown" : `${item.days_of_cover.toFixed(1)} days`}</td>
+                      <td>{item.lead_time_days == null ? "Unknown" : `${item.lead_time_days} days`}</td>
+                      <td>{item.target_stock_units == null ? "—" : formatNumber(item.target_stock_units)}</td>
+                      <td>
+                        <strong className={isReorder ? "replenishment-quantity risk-text" : "replenishment-quantity positive-text"}>
+                          {item.recommended_order_quantity == null
+                            ? "—"
+                            : `${formatNumber(item.recommended_order_quantity)} units`}
+                        </strong>
+                      </td>
+                      <td>
+                        <div className="replenishment-badges">
+                          <StatusPill status={actionStatus}>
+                            {item.action.replaceAll("_", " ")}
+                          </StatusPill>
+                          {isLowConfidence && (
+                            <StatusPill status="warning">Low confidence</StatusPill>
+                          )}
+                        </div>
+                        {item.reason && <div className="muted-note replenishment-reason">{item.reason}</div>}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <p className="muted-note replenishment-disclaimer">
+            Preliminary decision support only. Recommendations exclude open purchase orders, minimum order quantities,
+            pack sizes, supplier capacity and stock that may expire before consumption. Validate demand and supplier
+            mappings before acting; separate supplier rows are scenarios, not instructions to order from every supplier.
+          </p>
+        </>
+      )}
+    </section>
+  );
+}
+
+
+function ProductionPanel() {
+  const [demandUnits, setDemandUnits] = useState("10000");
+  const [plantCapacityUnits, setPlantCapacityUnits] = useState("8000");
+  const [utilizationLimit, setUtilizationLimit] = useState("0.95");
+  const [copackerCapacityUnits, setCopackerCapacityUnits] = useState("3000");
+  const [plan, setPlan] = useState<ProductionPlan | null>(null);
+  const [status, setStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
+  const [errorMessage, setErrorMessage] = useState("");
+
+  async function submitPlan(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setStatus("loading");
+    setErrorMessage("");
+    setPlan(null);
+
+    const request: ProductionRequest = {
+      demand_units: Number(demandUnits),
+      plant_capacity_units: Number(plantCapacityUnits),
+      utilization_limit: Number(utilizationLimit),
+      copacker_capacity_units: Number(copackerCapacityUnits),
+    };
+
+    if (
+      ![request.demand_units, request.plant_capacity_units, request.utilization_limit, request.copacker_capacity_units].every(Number.isFinite) ||
+      request.demand_units < 0 ||
+      request.plant_capacity_units < 0 ||
+      request.copacker_capacity_units < 0 ||
+      request.utilization_limit <= 0 ||
+      request.utilization_limit > 1
+    ) {
+      setStatus("error");
+      setErrorMessage("Enter non-negative unit quantities and a utilization limit greater than 0 and at most 1.");
+      return;
+    }
+
+    try {
+      const result = await createProductionPlan(request);
+      setPlan(result);
+      setStatus("success");
+    } catch (error) {
+      setStatus("error");
+      setErrorMessage(error instanceof Error ? error.message : "Could not create the production plan.");
+    }
+  }
+
+  const fieldStyle: React.CSSProperties = {
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+    minWidth: 0,
+    color: "#cbd5e1",
+    fontSize: 12,
+  };
+
+  const inputStyle: React.CSSProperties = {
+    display: "block",
+    boxSizing: "border-box",
+    width: "100%",
+    minWidth: 0,
+    height: 43,
+    padding: "10px 12px",
+    border: "1px solid #334155",
+    borderRadius: 8,
+    background: "#0b1220",
+    color: "#f8fafc",
+    fontSize: 13,
+  };
+
+  const resultCardStyle: React.CSSProperties = {
+    display: "flex",
+    flexDirection: "column",
+    gap: 10,
+    minWidth: 0,
+    padding: 17,
+    border: "1px solid #263449",
+    borderRadius: 11,
+    background: "#111c2c",
+  };
+
+  const number = (value: number) => value.toLocaleString("en-IN");
+
+  return (
+    <section className="panel">
+      <PanelHeader eyebrow="PRODUCTION PLANNING" title="Create a production plan" />
+
+      <p className="panel-description">
+        Allocate demand to the plant first, respecting its utilization limit, then use available co-packer capacity for remaining demand. Quantities must use the same unit.
+      </p>
+
+      <form
+        onSubmit={submitPlan}
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: 20,
+          width: "100%",
+          marginTop: 22,
+        }}
+      >
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 250px), 1fr))",
+            gap: 18,
+            width: "100%",
+          }}
+        >
+          <label style={fieldStyle}>
+            Demand (units)
+            <input style={inputStyle} type="number" min="0" step="1" required value={demandUnits} onChange={(e) => setDemandUnits(e.target.value)} />
+          </label>
+
+          <label style={fieldStyle}>
+            Plant capacity (units)
+            <input style={inputStyle} type="number" min="0" step="1" required value={plantCapacityUnits} onChange={(e) => setPlantCapacityUnits(e.target.value)} />
+          </label>
+
+          <label style={fieldStyle}>
+            Utilization limit (0–1)
+            <input style={inputStyle} type="number" min="0.01" max="1" step="0.01" required value={utilizationLimit} onChange={(e) => setUtilizationLimit(e.target.value)} />
+            <small style={{ color: "#8295b2", fontSize: 10 }}>0.95 means 95% of plant capacity.</small>
+          </label>
+
+          <label style={fieldStyle}>
+            Co-packer capacity (units)
+            <input style={inputStyle} type="number" min="0" step="1" required value={copackerCapacityUnits} onChange={(e) => setCopackerCapacityUnits(e.target.value)} />
+          </label>
+        </div>
+
+        <button className="primary-button" type="submit" disabled={status === "loading"} style={{ alignSelf: "flex-start" }}>
+          <Factory size={15} />
+          {status === "loading" ? "Creating plan..." : "Create production plan"}
+        </button>
+      </form>
+
+      {status === "error" && (
+        <div className="production-error" role="alert" style={{ marginTop: 18 }}>
+          <AlertTriangle size={17} /> {errorMessage}
+        </div>
+      )}
+
+      {plan && (
+        <div style={{ marginTop: 27, paddingTop: 23, borderTop: "1px solid #263449" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 15, marginBottom: 18, flexWrap: "wrap" }}>
+            <div>
+              <div className="eyebrow">PLAN RESULT</div>
+              <h3 style={{ margin: "6px 0 0" }}>Production allocation</h3>
+            </div>
+            <StatusPill status={plan.unmet_demand_units === 0 ? "success" : "warning"}>
+              {plan.unmet_demand_units === 0 ? "Demand covered" : "Demand shortfall"}
+            </StatusPill>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 190px), 1fr))", gap: 13, margin: "17px 0 21px" }}>
+            {[
+              ["Total production", plan.total_production_units],
+              ["Plant output", plan.plant_output_units],
+              ["Co-packer output", plan.copacker_output_units],
+              ["Unmet demand", plan.unmet_demand_units],
+            ].map(([label, value]) => (
+              <div key={String(label)} style={resultCardStyle}>
+                <span style={{ color: "#8ca5c8", fontSize: 11 }}>{label}</span>
+                <strong style={{ color: "#f8fafc", fontSize: 24 }}>{number(Number(value))}</strong>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column" }}>
+            {[
+              ["Demand", `${number(plan.demand_units)} units`],
+              ["Plant capacity", `${number(plan.plant_capacity_units)} units`],
+              ["Unused permitted plant capacity", `${number(plan.unused_plant_capacity_units)} units`],
+              ["Available co-packer capacity", `${number(plan.copacker_capacity_units)} units`],
+            ].map(([label, value]) => (
+              <div key={label} style={{ display: "flex", justifyContent: "space-between", gap: 16, padding: "12px 0", borderBottom: "1px solid #202e41", flexWrap: "wrap" }}>
+                <span style={{ color: "#8ca5c8", fontSize: 11 }}>{label}</span>
+                <strong style={{ fontSize: 11 }}>{value}</strong>
+              </div>
+            ))}
+          </div>
+
+          <p className="muted-note">
+            Live API result. The planner assumes the entered co-packer capacity is available and does not optimize production cost.
+          </p>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function pageDescription(page: string): string {
+  const descriptions: Record<string, string> = {
+    "Demand Intelligence": "Understand demand signals and forecast performance.",
+    "Supply Intelligence": "Review supplier lead times and replenishment decisions.",
+    Inventory: "Track stock, expiry exposure and product master data.",
+    Production: "Plan production across plant capacity and co-packer support.",
+    "Distribution & Transport": "Monitor depot movement, dispatches and transport execution.",
+    "Decision Deadlines": "Track time-sensitive operational decisions and follow-ups.",
+    "Scenario Lab": "Explore what-if scenarios for supply chain decisions.",
+    Settings: "Manage the local workspace and service status.",
+  };
+  return descriptions[page] ?? "Supply chain operations workspace.";
+}
+
 function App() {
   const [products, setProducts] = useState<Product[]>([]);
   const [productStatus, setProductStatus] = useState<LoadStatus>("loading");
@@ -424,6 +795,10 @@ function App() {
   const [inventory, setInventory] = useState<InventoryLot[]>([]);
   const [expiringLots, setExpiringLots] = useState<InventoryLot[]>([]);
   const [inventoryStatus, setInventoryStatus] =
+    useState<LoadStatus>("loading");
+
+  const [replenishments, setReplenishments] = useState<ReplenishmentRecommendation[]>([]);
+  const [replenishmentStatus, setReplenishmentStatus] =
     useState<LoadStatus>("loading");
 
   const [activeNav, setActiveNav] = useState("Control Tower");
@@ -461,8 +836,21 @@ function App() {
     }
   }
 
+  async function loadReplenishments() {
+    setReplenishmentStatus("loading");
+
+    try {
+      const data = await getReplenishmentRecommendations();
+      setReplenishments(data.results);
+      setReplenishmentStatus("connected");
+    } catch (error) {
+      console.error("Failed to load replenishment recommendations:", error);
+      setReplenishmentStatus("error");
+    }
+  }
+
   async function refreshAll() {
-    await Promise.all([loadProducts(), loadInventory()]);
+    await Promise.all([loadProducts(), loadInventory(), loadReplenishments()]);
     setLastUpdated(new Date());
   }
 
@@ -582,6 +970,52 @@ function App() {
         </header>
 
         <div className="page-content">
+          {activeNav !== "Control Tower" ? (
+            <>
+              <section className="page-heading">
+                <div>
+                  <div className="eyebrow page-eyebrow">
+                    <span className="live-indicator" /> PULSE WORKSPACE
+                  </div>
+                  <h1>{activeNav}<span>.</span></h1>
+                  <p>{pageDescription(activeNav)}</p>
+                </div>
+                <button className="primary-button" onClick={() => void refreshAll()}>
+                  <RefreshCw size={15} /> Refresh data
+                </button>
+              </section>
+
+              {activeNav === "Inventory" ? (
+                <>
+                  <section className="dashboard-data-section">
+                    <div className="section-heading"><div><h2>Inventory intelligence</h2><p>Live lot-level stock and expiry visibility from the backend.</p></div></div>
+                    <LiveInventory inventory={inventory} expiringLots={expiringLots} status={inventoryStatus} onRefresh={() => void loadInventory()} />
+                  </section>
+                  <section className="dashboard-data-section" id="product-master">
+                    <div className="section-heading"><div><h2>Product master</h2><p>Products registered in your application backend.</p></div><div className="search-box"><Search size={15} /><input aria-label="Search products" placeholder="Search products or SKU..." value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} /></div></div>
+                    <ProductMaster products={filteredProducts} status={productStatus} onRefresh={() => void loadProducts()} />
+                  </section>
+                </>
+              ) : activeNav === "Supply Intelligence" ? (
+                <>
+                  <ReplenishmentPanel recommendations={replenishments} status={replenishmentStatus} onRefresh={() => void loadReplenishments()} />
+                  <section className="panel"><PanelHeader eyebrow="SUPPLY INTELLIGENCE" title="Supplier and lead-time signals" /><p className="panel-description">Recommendations use available supplier mappings, estimated daily demand, usable inventory and safety stock. Validate low-confidence demand and supplier data before acting.</p></section>
+                </>
+              ) : activeNav === "Production" ? (
+                <ProductionPanel />
+              ) : activeNav === "Demand Intelligence" ? (
+                <>
+                  <section className="panel demand-panel"><PanelHeader eyebrow="DEMAND INTELLIGENCE" title="Demand vs. forecast" /><div className="empty-state"><BarChart3 size={22} /><strong>Demand history integration pending</strong><span>The current chart on Control Tower is illustrative. This page will become data-driven when a time-series demand endpoint is available.</span></div><DemandChart /></section>
+                </>
+              ) : activeNav === "Settings" ? (
+                <section className="panel"><PanelHeader eyebrow="WORKSPACE" title="Settings" /><p className="panel-description">PULSE is currently configured to use the local FastAPI service at localhost:8000. Environment and user-management settings are not yet implemented.</p><div className="panel-meta"><span>Product API</span><StatusPill status={productStatus === "connected" ? "success" : productStatus === "error" ? "danger" : "neutral"}>{productStatus}</StatusPill></div><div className="panel-meta"><span>Inventory API</span><StatusPill status={inventoryStatus === "connected" ? "success" : inventoryStatus === "error" ? "danger" : "neutral"}>{inventoryStatus}</StatusPill></div><div className="panel-meta"><span>Replenishment API</span><StatusPill status={replenishmentStatus === "connected" ? "success" : replenishmentStatus === "error" ? "danger" : "neutral"}>{replenishmentStatus}</StatusPill></div></section>
+              ) : (
+                <section className="panel"><PanelHeader eyebrow="WORKSPACE MODULE" title={activeNav} /><div className="empty-state"><Clock3 size={22} /><strong>This module is not connected yet</strong><span>{pageDescription(activeNav)} The navigation now opens its own page; the operational workflow and backend integration for this module are still to be built.</span></div></section>
+              )}
+              <footer className="page-footer"><span>PULSE Supply Chain Intelligence</span><span><MapPinned size={13} /> India Operations</span><span>Prototype dashboard · Validate data before operational use</span></footer>
+            </>
+          ) : (
+            <>
           <section className="page-heading">
             <div>
               <div className="eyebrow page-eyebrow">
@@ -722,6 +1156,12 @@ function App() {
             </section>
           </div>
 
+          <ReplenishmentPanel
+            recommendations={replenishments}
+            status={replenishmentStatus}
+            onRefresh={() => void loadReplenishments()}
+          />
+
           <section className="panel action-panel">
             <PanelHeader
               eyebrow="DECISION SUPPORT"
@@ -829,6 +1269,8 @@ function App() {
             </span>
             <span>Prototype dashboard · Validate data before operational use</span>
           </footer>
+            </>
+          )}
         </div>
       </main>
     </div>
